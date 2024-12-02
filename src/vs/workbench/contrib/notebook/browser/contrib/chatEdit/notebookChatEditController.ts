@@ -152,6 +152,10 @@ class NotebookChatEditorController extends Disposable {
 			if (!entry || !modified || !original || !diffInfo) {
 				return;
 			}
+			if (entry.state.read(r) !== WorkingSetEntryState.Modified) {
+				clearDecorators();
+				return;
+			}
 			if (diffInfo && updatedCellDecoratorsOnceBefore && (diffInfo.modelVersion !== modified.versionId)) {
 				return;
 			}
@@ -200,6 +204,11 @@ class NotebookChatEditorController extends Disposable {
 			const original = originalModel.read(r);
 			const ready = readyToRenderViewzones.read(r);
 			if (!ready || !entry || !modified || !original || !diffInfo) {
+				return;
+			}
+			if (entry.state.read(r) !== WorkingSetEntryState.Modified) {
+				this.insertedCellDecorator.apply([]);
+				this.deletedCellDecorator.apply([], original);
 				return;
 			}
 			if (diffInfo && updatedDeletedInsertedDecoratorsOnceBefore && (diffInfo.modelVersion !== modified.versionId)) {
