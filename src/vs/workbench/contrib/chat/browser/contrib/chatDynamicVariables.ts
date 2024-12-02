@@ -15,7 +15,7 @@ import { ITextModelService } from '../../../../../editor/common/services/resolve
 import { localize } from '../../../../../nls.js';
 import { Action2, registerAction2 } from '../../../../../platform/actions/common/actions.js';
 import { ICommandService } from '../../../../../platform/commands/common/commands.js';
-import { ServicesAccessor } from '../../../../../platform/instantiation/common/instantiation.js';
+import { IInstantiationService, ServicesAccessor } from '../../../../../platform/instantiation/common/instantiation.js';
 import { ILabelService } from '../../../../../platform/label/common/label.js';
 import { ILogService } from '../../../../../platform/log/common/log.js';
 import { AnythingQuickAccessProviderRunOptions, IQuickAccessOptions } from '../../../../../platform/quickinput/common/quickAccess.js';
@@ -24,14 +24,16 @@ import { IChatWidget } from '../chat.js';
 import { ChatWidget, IChatWidgetContrib } from '../chatWidget.js';
 import { IChatRequestVariableValue, IChatVariablesService, IDynamicVariable } from '../../common/chatVariables.js';
 import { ISymbolQuickPickItem } from '../../../search/browser/symbolsQuickAccess.js';
+import { ChatDynamicVariable } from './chatDynamicVariable.js';
+import { EditOperation } from '../../../../../editor/common/core/editOperation.js';
 
 export const dynamicVariableDecorationType = 'chat-dynamic-variable';
 
 export class ChatDynamicVariableModel extends Disposable implements IChatWidgetContrib {
 	public static readonly ID = 'chatDynamicVariableModel';
 
-	private _variables: IDynamicVariable[] = [];
-	get variables(): ReadonlyArray<IDynamicVariable> {
+	private _variables: ChatDynamicVariable[] = [];
+	get variables(): ReadonlyArray<ChatDynamicVariable> {
 		return [...this._variables];
 	}
 
@@ -42,12 +44,20 @@ export class ChatDynamicVariableModel extends Disposable implements IChatWidgetC
 	constructor(
 		private readonly widget: IChatWidget,
 		@ILabelService private readonly labelService: ILabelService,
+		@IInstantiationService private readonly instantiationService: IInstantiationService,
 	) {
 		super();
+
+		this.onVariablesChanged = this.onVariablesChanged.bind(this);
+
 		this._register(widget.inputEditor.onDidChangeModelContent(e => {
 			e.changes.forEach(c => {
 				// Don't mutate entries in _variables, since they will be returned from the getter
 				this._variables = coalesce(this._variables.map(ref => {
+					if (c.text === `#file:${ref.filenameWithReferences}`) {
+						return ref;
+					}
+
 					const intersection = Range.intersectRanges(ref.range, c.range);
 					if (intersection && !intersection.isEmpty()) {
 						// The reference text was changed, it's broken.
@@ -60,18 +70,19 @@ export class ChatDynamicVariableModel extends Disposable implements IChatWidgetC
 							}]);
 							this.widget.refreshParsedInput();
 						}
+
+						ref.dispose();
 						return null;
 					} else if (Range.compareRangesUsingStarts(ref.range, c.range) > 0) {
 						const delta = c.text.length - c.rangeLength;
-						return {
-							...ref,
-							range: {
-								startLineNumber: ref.range.startLineNumber,
-								startColumn: ref.range.startColumn + delta,
-								endLineNumber: ref.range.endLineNumber,
-								endColumn: ref.range.endColumn + delta
-							}
+						ref.range = {
+							startLineNumber: ref.range.startLineNumber,
+							startColumn: ref.range.startColumn + delta,
+							endLineNumber: ref.range.endLineNumber,
+							endColumn: ref.range.endColumn + delta,
 						};
+
+						return ref;
 					}
 
 					return ref;
@@ -91,14 +102,61 @@ export class ChatDynamicVariableModel extends Disposable implements IChatWidgetC
 			s = [];
 		}
 
+		this.disposeVariables();
 		this._variables = s;
 		this.updateDecorations();
 	}
 
 	addReference(ref: IDynamicVariable): void {
-		this._variables.push(ref);
+		const variable = this.instantiationService.createInstance(ChatDynamicVariable, ref);
+
+		this._variables.push(variable);
+		this.onVariablesChanged();
+
+		// if the `prompt snippets` feature is enabled, start resolving
+		// nested file references immediatelly and subscribe to updates
+		if (variable.isPromptSnippetFile) {
+			// subscribe to variable changes
+			variable.onUpdate(this.onVariablesChanged);
+			// start resolving the file references
+			variable.resolve();
+		}
+	}
+
+	/**
+	 * Function to run when a variable list or a single variable has changed.
+	 */
+	private onVariablesChanged(): void {
+		this.updateVariableTexts();
 		this.updateDecorations();
 		this.widget.refreshParsedInput();
+	}
+
+	/**
+	 * Update variables text inside input editor to add the `(+N more)`
+	 * suffix if the variable has nested child file references.
+	 */
+	private updateVariableTexts(): void {
+		for (const variable of this._variables) {
+			const text = `#file:${variable.filenameWithReferences}`;
+			const range = variable.range;
+
+			const success = this.widget.inputEditor.executeEdits(
+				'chatUpdateFileReference',
+				[EditOperation.replaceMove(new Range(range.startLineNumber, range.startColumn, range.endLineNumber, range.endColumn), text)],
+			);
+
+			if (!success) {
+				continue;
+			}
+
+			variable.range = new Range(
+				range.startLineNumber,
+				range.startColumn,
+				range.endLineNumber,
+				range.startColumn + text.length,
+			);
+		}
 	}
 
 	private updateDecorations(): void {
@@ -108,17 +166,46 @@ export class ChatDynamicVariableModel extends Disposable implements IChatWidgetC
 		})));
 	}
 
-	private getHoverForReference(ref: IDynamicVariable): IMarkdownString | undefined {
-		const value = ref.data;
-		if (URI.isUri(value)) {
-			return new MarkdownString(this.labelService.getUriLabel(value, { relative: true }));
-		} else if (isLocation(value)) {
-			const prefix = ref.fullName ? ` ${ref.fullName}` : '';
-			const rangeString = `#${value.range.startLineNumber}-${value.range.endLineNumber}`;
-			return new MarkdownString(prefix + this.labelService.getUriLabel(value.uri, { relative: true }) + rangeString);
-		} else {
-			return undefined;
+	private getHoverForReference(variable: IDynamicVariable): IMarkdownString | IMarkdownString[] {
+		const result: IMarkdownString[] = [];
+		const { data } = variable;
+
+		if (isLocation(data)) {
+			const prefix = variable.fullName ? ` ${variable.fullName}` : '';
+			const rangeString = `#${data.range.startLineNumber}-${data.range.endLineNumber}`;
+			return new MarkdownString(prefix + this.labelService.getUriLabel(data.uri, { relative: true }) + rangeString);
 		}
+
+		if (!URI.isUri(data)) {
+			return result;
+		}
+
+		result.push(new MarkdownString(
+			`${this.labelService.getUriLabel(data, { relative: true })}`,
+		));
+
+		// if reference has nested child file references, include them in the label
+		for (const childUri of variable.validFileReferenceUris ?? []) {
+			result.push(new MarkdownString(
+				`  • ${this.labelService.getUriLabel(childUri, { relative: true })}`,
+			));
+		}
+
+		return result;
+	}
+
+	/**
+	 * Dispose all existing variables.
+	 */
+	private disposeVariables(): void {
+		for (const variable of this._variables) {
+			variable.dispose();
+		}
+	}
+
+	public override dispose() {
+		this.disposeVariables();
+		super.dispose();
 	}
 }
 
