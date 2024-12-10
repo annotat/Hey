@@ -32,7 +32,7 @@ export interface IMarkdownRendererOptions {
  * Markdown renderer that can render codeblocks with the editor mechanics. This
  * renderer should always be preferred.
  */
-export class MarkdownRenderer {
+export class MarkdownRenderer implements IDisposable {
 
 	private static _ttpTokenizer = createTrustedTypesPolicy('tokenizeToString', {
 		createHTML(html: string) {
@@ -105,10 +105,14 @@ export class MarkdownRenderer {
 			},
 			asyncRenderCallback: () => this._onDidRenderAsync.fire(),
 			actionHandler: {
-				callback: (link) => openLinkFromMarkdown(this._openerService, link, markdown.isTrusted),
+				callback: (link) => this.openMarkdownLink(link, markdown),
 				disposables: disposables
 			}
 		};
+	}
+
+	protected async openMarkdownLink(link: string, markdown: IMarkdownString) {
+		await openLinkFromMarkdown(this._openerService, link, markdown.isTrusted);
 	}
 }
 

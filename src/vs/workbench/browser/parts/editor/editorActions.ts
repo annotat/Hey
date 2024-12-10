@@ -5,7 +5,6 @@
 
 import { localize, localize2 } from '../../../../nls.js';
 import { Action } from '../../../../base/common/actions.js';
-import { firstOrDefault } from '../../../../base/common/arrays.js';
 import { IEditorIdentifier, IEditorCommandsContext, CloseDirection, SaveReason, EditorsOrder, EditorInputCapabilities, DEFAULT_EDITOR_ASSOCIATION, GroupIdentifier, EditorResourceAccessor } from '../../../common/editor.js';
 import { EditorInput } from '../../../common/editor/editorInput.js';
 import { SideBySideEditorInput } from '../../../common/editor/sideBySideEditorInput.js';
@@ -39,6 +38,7 @@ import { ICommandActionTitle } from '../../../../platform/action/common/action.j
 import { IProgressService, ProgressLocation } from '../../../../platform/progress/common/progress.js';
 import { resolveCommandsContext } from './editorCommandsContext.js';
 import { IListService } from '../../../../platform/list/browser/listService.js';
+import { InputMode } from '../../../../editor/common/inputMode.js';
 
 class ExecuteCommandAction extends Action2 {
 
@@ -656,7 +656,7 @@ abstract class AbstractCloseAllAction extends Action2 {
 
 			await this.revealEditorsToConfirm(editors, editorGroupService); // help user make a decision by revealing editors
 
-			const confirmation = await firstOrDefault(editors)?.editor.closeHandler?.confirm?.(editors);
+			const confirmation = await editors.at(0)?.editor.closeHandler?.confirm?.(editors);
 			if (typeof confirmation === 'number') {
 				switch (confirmation) {
 					case ConfirmResult.CANCEL:
@@ -1426,7 +1426,7 @@ export class NavigateForwardAction extends Action2 {
 			},
 			menu: [
 				{ id: MenuId.MenubarGoMenu, group: '1_history_nav', order: 2 },
-				{ id: MenuId.CommandCenter, order: 2 }
+				{ id: MenuId.CommandCenter, order: 2, when: ContextKeyExpr.has('config.workbench.navigationControl.enabled') }
 			]
 		});
 	}
@@ -1461,7 +1461,7 @@ export class NavigateBackwardsAction extends Action2 {
 			},
 			menu: [
 				{ id: MenuId.MenubarGoMenu, group: '1_history_nav', order: 1 },
-				{ id: MenuId.CommandCenter, order: 1 }
+				{ id: MenuId.CommandCenter, order: 1, when: ContextKeyExpr.has('config.workbench.navigationControl.enabled') }
 			]
 		});
 	}
@@ -2695,5 +2695,34 @@ export class NewEmptyEditorWindowAction extends Action2 {
 
 		const auxiliaryEditorPart = await editorGroupService.createAuxiliaryEditorPart();
 		auxiliaryEditorPart.activeGroup.focus();
+	}
+}
+
+export class ToggleOvertypeInsertMode extends Action2 {
+
+	constructor() {
+		super({
+			id: 'editor.action.toggleOvertypeInsertMode',
+			title: {
+				...localize2('toggleOvertypeInsertMode', "Toggle Overtype/Insert Mode"),
+				mnemonicTitle: localize({ key: 'mitoggleOvertypeInsertMode', comment: ['&& denotes a mnemonic'] }, "&&Toggle Overtype/Insert Mode"),
+			},
+			metadata: {
+				description: localize2('toggleOvertypeMode.description', "Toggle between overtype and insert mode"),
+			},
+			keybinding: {
+				weight: KeybindingWeight.WorkbenchContrib,
+				primary: KeyCode.Insert,
+				mac: { primary: KeyMod.Alt | KeyMod.CtrlCmd | KeyCode.KeyO },
+			},
+			f1: true,
+			category: Categories.View
+		});
+	}
+
+	override async run(accessor: ServicesAccessor): Promise<void> {
+		const oldInputMode = InputMode.getInputMode();
+		const newInputMode = oldInputMode === 'insert' ? 'overtype' : 'insert';
+		InputMode.setInputMode(newInputMode);
 	}
 }

@@ -42,9 +42,9 @@ import { mainWindow } from '../../../../../../base/browser/window.js';
 import { IContextMenuService } from '../../../../../../platform/contextview/browser/contextView.js';
 import { Action2, IMenu, IMenuService, MenuId, MenuItemAction, MenuRegistry, registerAction2 } from '../../../../../../platform/actions/common/actions.js';
 import { ContextKeyExpr, IContextKeyService, RawContextKey } from '../../../../../../platform/contextkey/common/contextkey.js';
-import { MenuEntryActionViewItem, createAndFillInActionBarActions } from '../../../../../../platform/actions/browser/menuEntryActionViewItem.js';
+import { MenuEntryActionViewItem, getActionBarActions } from '../../../../../../platform/actions/browser/menuEntryActionViewItem.js';
 import { IAction } from '../../../../../../base/common/actions.js';
-import { NotebookSectionArgs } from '../../controller/sectionActions.js';
+import { NotebookOutlineEntryArgs } from '../../controller/sectionActions.js';
 import { MarkupCellViewModel } from '../../viewModel/markupCellViewModel.js';
 import { Delayer, disposableTimeout } from '../../../../../../base/common/async.js';
 import { IOutlinePane } from '../../../../outline/browser/outline.js';
@@ -153,8 +153,12 @@ class NotebookOutlineRenderer implements ITreeRenderer<OutlineEntry, FuzzyScore,
 		}
 
 		if (this._target === OutlineTarget.OutlinePane) {
+			if (!this._editor) {
+				return;
+			}
+
 			const nbCell = node.element.cell;
-			const nbViewModel = this._editor?.getViewModel();
+			const nbViewModel = this._editor.getViewModel();
 			if (!nbViewModel) {
 				return;
 			}
@@ -181,7 +185,7 @@ class NotebookOutlineRenderer implements ITreeRenderer<OutlineEntry, FuzzyScore,
 			const actions = getOutlineToolbarActions(menu, { notebookEditor: this._editor, outlineEntry: node.element });
 			outlineEntryToolbar.setActions(actions.primary, actions.secondary);
 
-			this.setupToolbarListeners(outlineEntryToolbar, menu, actions, node.element, template);
+			this.setupToolbarListeners(this._editor, outlineEntryToolbar, menu, actions, node.element, template);
 			template.actionMenu.style.padding = '0 0.8em 0 0.4em';
 		}
 	}
@@ -210,7 +214,7 @@ class NotebookOutlineRenderer implements ITreeRenderer<OutlineEntry, FuzzyScore,
 		}
 	}
 
-	private setupToolbarListeners(toolbar: ToolBar, menu: IMenu, initActions: { primary: IAction[]; secondary: IAction[] }, entry: OutlineEntry, templateData: NotebookOutlineTemplate): void {
+	private setupToolbarListeners(editor: INotebookEditor, toolbar: ToolBar, menu: IMenu, initActions: { primary: IAction[]; secondary: IAction[] }, entry: OutlineEntry, templateData: NotebookOutlineTemplate): void {
 		// same fix as in cellToolbars setupListeners re #103926
 		let dropdownIsVisible = false;
 		let deferredUpdate: (() => void) | undefined;
@@ -218,13 +222,13 @@ class NotebookOutlineRenderer implements ITreeRenderer<OutlineEntry, FuzzyScore,
 		toolbar.setActions(initActions.primary, initActions.secondary);
 		templateData.elementDisposables.add(menu.onDidChange(() => {
 			if (dropdownIsVisible) {
-				const actions = getOutlineToolbarActions(menu, { notebookEditor: this._editor, outlineEntry: entry });
+				const actions = getOutlineToolbarActions(menu, { notebookEditor: editor, outlineEntry: entry });
 				deferredUpdate = () => toolbar.setActions(actions.primary, actions.secondary);
 
 				return;
 			}
 
-			const actions = getOutlineToolbarActions(menu, { notebookEditor: this._editor, outlineEntry: entry });
+			const actions = getOutlineToolbarActions(menu, { notebookEditor: editor, outlineEntry: entry });
 			toolbar.setActions(actions.primary, actions.secondary);
 		}));
 
@@ -249,15 +253,8 @@ class NotebookOutlineRenderer implements ITreeRenderer<OutlineEntry, FuzzyScore,
 	}
 }
 
-function getOutlineToolbarActions(menu: IMenu, args?: NotebookSectionArgs): { primary: IAction[]; secondary: IAction[] } {
-	const primary: IAction[] = [];
-	const secondary: IAction[] = [];
-	const result = { primary, secondary };
-
-	// TODO: @Yoyokrazy bring the "inline" back when there's an appropriate run in section icon
-	createAndFillInActionBarActions(menu, { shouldForwardArgs: true, arg: args }, result); //, g => /^inline/.test(g));
-
-	return result;
+function getOutlineToolbarActions(menu: IMenu, args?: NotebookOutlineEntryArgs): { primary: IAction[]; secondary: IAction[] } {
+	return getActionBarActions(menu.getActions({ shouldForwardArgs: true, arg: args }), g => /^inline/.test(g));
 }
 
 class NotebookOutlineAccessibility implements IListAccessibilityProvider<OutlineEntry> {
@@ -521,7 +518,6 @@ export class NotebookCellOutline implements IOutline<OutlineEntry> {
 	private _breadcrumbsDataSource!: IBreadcrumbsDataSource<OutlineEntry>;
 
 	// view settings
-	private gotoShowCodeCellSymbols: boolean;
 	private outlineShowCodeCellSymbols: boolean;
 
 	// getters
@@ -562,7 +558,6 @@ export class NotebookCellOutline implements IOutline<OutlineEntry> {
 		@ILanguageFeaturesService private readonly _languageFeaturesService: ILanguageFeaturesService,
 		@INotebookExecutionStateService private readonly _notebookExecutionStateService: INotebookExecutionStateService,
 	) {
-		this.gotoShowCodeCellSymbols = this._configurationService.getValue<boolean>(NotebookSetting.gotoSymbolsAllSymbols);
 		this.outlineShowCodeCellSymbols = this._configurationService.getValue<boolean>(NotebookSetting.outlineShowCodeCellSymbols);
 
 		this.initializeOutline();
@@ -633,8 +628,7 @@ export class NotebookCellOutline implements IOutline<OutlineEntry> {
 
 		// recompute symbols when the configuration changes (recompute state - and therefore recompute active - is also called within compute symbols)
 		this._disposables.add(this._configurationService.onDidChangeConfiguration(e => {
-			if (e.affectsConfiguration(NotebookSetting.gotoSymbolsAllSymbols) || e.affectsConfiguration(NotebookSetting.outlineShowCodeCellSymbols)) {
-				this.gotoShowCodeCellSymbols = this._configurationService.getValue<boolean>(NotebookSetting.gotoSymbolsAllSymbols);
+			if (e.affectsConfiguration(NotebookSetting.outlineShowCodeCellSymbols)) {
 				this.outlineShowCodeCellSymbols = this._configurationService.getValue<boolean>(NotebookSetting.outlineShowCodeCellSymbols);
 				this.computeSymbols();
 			}
@@ -700,12 +694,13 @@ export class NotebookCellOutline implements IOutline<OutlineEntry> {
 	}
 
 	private async computeSymbols(cancelToken: CancellationToken = CancellationToken.None) {
-		if (this._target === OutlineTarget.QuickPick && this.gotoShowCodeCellSymbols) {
-			await this._outlineDataSourceReference?.object?.computeFullSymbols(cancelToken);
-		} else if (this._target === OutlineTarget.OutlinePane && this.outlineShowCodeCellSymbols) {
+		if (this._target === OutlineTarget.OutlinePane && this.outlineShowCodeCellSymbols) {
 			// No need to wait for this, we want the outline to show up quickly.
-			void this._outlineDataSourceReference?.object?.computeFullSymbols(cancelToken);
+			void this.doComputeSymbols(cancelToken);
 		}
+	}
+	public async doComputeSymbols(cancelToken: CancellationToken): Promise<void> {
+		await this._outlineDataSourceReference?.object?.computeFullSymbols(cancelToken);
 	}
 	private async delayedComputeSymbols() {
 		this.delayerRecomputeState.cancel();
@@ -814,7 +809,7 @@ export class NotebookOutlineCreator implements IOutlineCreator<NotebookEditor, O
 
 	constructor(
 		@IOutlineService outlineService: IOutlineService,
-		@IInstantiationService private readonly _instantiationService: IInstantiationService,
+		@IInstantiationService private readonly _instantiationService: IInstantiationService
 	) {
 		const reg = outlineService.registerOutlineCreator(this);
 		this.dispose = () => reg.dispose();
@@ -824,8 +819,14 @@ export class NotebookOutlineCreator implements IOutlineCreator<NotebookEditor, O
 		return candidate.getId() === NotebookEditor.ID;
 	}
 
-	async createOutline(editor: NotebookEditor, target: OutlineTarget, cancelToken: CancellationToken): Promise<IOutline<OutlineEntry> | undefined> {
-		return this._instantiationService.createInstance(NotebookCellOutline, editor, target);
+	async createOutline(editor: INotebookEditorPane, target: OutlineTarget, cancelToken: CancellationToken): Promise<IOutline<OutlineEntry> | undefined> {
+		const outline = this._instantiationService.createInstance(NotebookCellOutline, editor, target);
+		if (target === OutlineTarget.QuickPick) {
+			// The quickpick creates the outline on demand
+			// so we need to ensure the symbols are pre-cached before the entries are syncronously requested
+			await outline.doComputeSymbols(cancelToken);
+		}
+		return outline;
 	}
 }
 
